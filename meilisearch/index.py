@@ -351,11 +351,14 @@ class Index:
             - filter: Filter queries by an attribute's value
             - limit: Maximum number of documents returned
             - offset: Number of documents to skip
+            - hanamiSearchVersion: "v1" or "v2" to select normal or hybrid search on HanamiSearch
+            - cursor: Cursor token for PIT-based pagination (HanamiSearch extension)
 
         Returns
         -------
         results:
             Dictionary with hits, offset, limit, processingTime and initial query
+            (may include nextCursor when cursor pagination is enabled)
 
         Raises
         ------
@@ -371,6 +374,76 @@ class Index:
             f"{self.config.paths.index}/{self.uid}/{self.config.paths.search}",
             body=body,
         )
+
+    def search_with_cursor(
+        self,
+        query: str,
+        opt_params: Optional[Mapping[str, Any]] = None,
+        *,
+        cursor: Optional[str] = None,
+        max_pages: Optional[int] = None,
+    ) -> Generator[Dict[str, Any], None, None]:
+        """Search in the index using HanamiSearch v2 cursor pagination.
+
+        This helper enforces ``hanamiSearchVersion="v2"`` and yields each page while
+        ``nextCursor`` is present in the response. Use ``cursor`` to resume from a
+        previously returned cursor token.
+
+        Parameters
+        ----------
+        query:
+            String containing the searched word(s)
+        opt_params (optional):
+            Dictionary containing optional query parameters. Note: ``offset`` is ignored
+            for cursor pagination.
+        cursor (optional):
+            Cursor token to resume pagination from a previous page.
+        max_pages (optional):
+            Maximum number of pages to yield before stopping.
+
+        Yields
+        ------
+        results:
+            Dictionary with hits, limit, processingTime, and initial query
+            (may include nextCursor when cursor pagination is enabled)
+
+        Raises
+        ------
+        ValueError
+            If hanamiSearchVersion is set to a non-v2 value.
+        MeilisearchApiError
+            An error containing details about why Meilisearch can't process your request.
+        """
+        if max_pages is not None and max_pages <= 0:
+            return
+
+        params: Dict[str, Any] = dict(opt_params or {})
+        version = params.get("hanamiSearchVersion")
+        if version is not None and str(version).strip() != "v2":
+            raise ValueError("cursor pagination requires hanamiSearchVersion to be 'v2'")
+        params["hanamiSearchVersion"] = "v2"
+
+        if "offset" in params:
+            warn(
+                "offset is ignored when using cursor pagination (hanamiSearchVersion='v2')",
+                UserWarning,
+            )
+            params.pop("offset", None)
+
+        if cursor is not None:
+            params["cursor"] = cursor
+
+        pages_yielded = 0
+        while True:
+            results = self.search(query, params)
+            yield results
+            pages_yielded += 1
+            if max_pages is not None and pages_yielded >= max_pages:
+                break
+            next_cursor = results.get("nextCursor")
+            if not next_cursor:
+                break
+            params["cursor"] = next_cursor
 
     @version_error_hint_message
     def facet_search(
